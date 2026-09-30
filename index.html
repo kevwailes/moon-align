@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Moon Aligner</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f5f5f7;--fg:#1c1c1e;--card:#fff;--mut:#6b6b73;--acc:#3b5bdb;--bd:#d9d9df}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d0e12;--fg:#e8e8ee;--card:#181a20;--mut:#9a9aa6;--acc:#7c93ff;--bd:#2c2f38}}
+:root[data-theme="dark"]{--bg:#0d0e12;--fg:#e8e8ee;--card:#181a20;--mut:#9a9aa6;--acc:#7c93ff;--bd:#2c2f38}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px}
+h1{font-size:20px;margin:0 0 4px}
+p.sub{color:var(--mut);margin:0 0 14px}
+.bar{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;display:grid;gap:10px;margin-bottom:16px}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+label.ctl{display:flex;flex-direction:column;font-size:12px;color:var(--mut);gap:2px;min-width:130px;flex:1}
+label.ctl b{color:var(--fg);font-weight:500}
+input[type=range]{width:100%;accent-color:var(--acc)}
+button,.file{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer}
+button.sec{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+.file input{display:none}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:10px;display:grid;gap:6px}
+.card canvas{width:100%;height:auto;border-radius:8px;background:#000;display:block}
+.card .name{font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card details summary{font-size:13px;cursor:pointer;color:var(--mut)}
+.chk{font-size:13px;display:flex;gap:6px;align-items:center}
+#msg{color:var(--mut);font-size:13px}
+</style>
+</head>
+<body>
+<h1>Moon Aligner</h1>
+<p class="sub">Pick several moon photos. Each is cropped, scaled so the lunar disc is the same size, and rotated to match.</p>
+
+<div class="bar">
+  <div class="row">
+    <label class="file">Choose images<input id="files" type="file" accept="image/*" multiple></label>
+    <button class="sec" id="detect">Re-detect discs</button>
+    <button id="align">Auto-align rotation to first</button>
+    <button class="sec" id="saveAll">Save all PNGs</button>
+  </div>
+  <div class="row">
+    <label class="ctl"><span>Output size <b id="vSize">400</b>px</span><input id="size" type="range" min="150" max="800" step="10" value="400"></label>
+    <label class="ctl"><span>Disc diameter <b id="vFill">90</b>% of frame</span><input id="fill" type="range" min="50" max="98" value="90"></label>
+    <label class="ctl"><span>Detect threshold <b id="vThr">auto</b></span><input id="thr" type="range" min="0" max="100" value="0"></label>
+  </div>
+  <div id="msg">Tip: for crescents/partial phases, auto-detect can be off — tweak centre and radius per image. Use Save PNG on a card, or Save all PNGs for everything.</div>
+</div>
+
+<div id="grid"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const items=[];
+const grid=$('grid'),msg=$('msg');
+
+function otsu(h,total){
+  let sum=0;for(let i=0;i<256;i++)sum+=i*h[i];
+  let sB=0,wB=0,best=0,t=0;
+  for(let i=0;i<256;i++){
+    wB+=h[i];if(!wB)continue;
+    const wF=total-wB;if(!wF)break;
+    sB+=i*h[i];
+    const mB=sB/wB,mF=(sum-sB)/wF,v=wB*wF*(mB-mF)*(mB-mF);
+    if(v>best){best=v;t=i}
+  }
+  return t;
+}
+
+function detect(img){
+  const s=Math.min(1,400/Math.max(img.naturalWidth,img.naturalHeight));
+  const w=Math.max(1,Math.round(img.naturalWidth*s)),h=Math.max(1,Math.round(img.naturalHeight*s));
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const x=c.getContext('2d',{willReadFrequently:true});
+  x.drawImage(img,0,0,w,h);
+  const d=x.getImageData(0,0,w,h).data;
+  const g=new Uint8Array(w*h),hist=new Array(256).fill(0);
+  for(let i=0;i<w*h;i++){const v=(d[i*4]*.299+d[i*4+1]*.587+d[i*4+2]*.114)|0;g[i]=v;hist[v]++}
+  const sl=+$('thr').value;
+  const t=sl>0?Math.round(sl*2.55):otsu(hist,w*h);
+  const rows=new Uint16Array(h),cols=new Uint16Array(w);
+  for(let j=0;j<h;j++)for(let i=0;i<w;i++)if(g[j*w+i]>t){rows[j]++;cols[i]++}
+  const min=3;
+  let x0=0,x1=w-1,y0=0,y1=h-1;
+  while(x0<w&&cols[x0]<min)x0++;while(x1>x0&&cols[x1]<min)x1--;
+  while(y0<h&&rows[y0]<min)y0++;while(y1>y0&&rows[y1]<min)y1--;
+  if(x1<=x0||y1<=y0)return{cx:img.naturalWidth/2,cy:img.naturalHeight/2,r:Math.min(img.naturalWidth,img.naturalHeight)/2};
+  return{cx:(x0+x1+1)/2/s,cy:(y0+y1+1)/2/s,r:Math.max(x1-x0+1,y1-y0+1)/2/s};
+}
+
+function draw(cv,it,size,rotOverride){
+  cv.width=cv.height=size;
+  const x=cv.getContext('2d'),p=it.p;
+  x.fillStyle='#000';x.fillRect(0,0,size,size);
+  x.save();
+  x.translate(size/2,size/2);
+  x.rotate((rotOverride??p.rot)*Math.PI/180);
+  if(p.flip)x.scale(-1,1);
+  const k=(size*$('fill').value/100/2)/p.r;
+  x.scale(k,k);
+  x.imageSmoothingQuality='high';
+  x.drawImage(it.img,-p.cx,-p.cy);
+  x.restore();
+}
+const redraw=it=>draw(it.cv,it,+$('size').value);
+const redrawAll=()=>items.forEach(redraw);
+
+function sig(it,rot){
+  const n=64,c=document.createElement('canvas');
+  const old=$('fill').value;
+  draw(c,it,n,rot);
+  const d=c.getContext('2d').getImageData(0,0,n,n).data,out=[];
+  const R=n*old/100/2*0.95;
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){
+    const dx=i-n/2+.5,dy=j-n/2+.5;
+    if(dx*dx+dy*dy<R*R)out.push(d[(j*n+i)*4]*.299+d[(j*n+i)*4+1]*.587+d[(j*n+i)*4+2]*.114);
+  }
+  return out;
+}
+function ncc(a,b){
+  let ma=0,mb=0;for(let i=0;i<a.length;i++){ma+=a[i];mb+=b[i]}
+  ma/=a.length;mb/=b.length;
+  let n=0,da=0,db=0;
+  for(let i=0;i<a.length;i++){const x=a[i]-ma,y=b[i]-mb;n+=x*y;da+=x*x;db+=y*y}
+  return n/Math.sqrt(da*db+1e-9);
+}
+function alignAll(){
+  if(items.length<2){msg.textContent='Add at least two images first.';return}
+  const ref=sig(items[0],0);
+  msg.textContent='Aligning…';
+  setTimeout(()=>{
+    for(let k=1;k<items.length;k++){
+      const it=items[k];let best=-2,ba=0;
+      for(let a=-180;a<180;a+=2){
+        const s=ncc(ref,sig(it,a));
+        if(s>best){best=s;ba=a}
+      }
+      it.p.rot=ba;it.ui.rot.value=ba;it.ui.rotV.textContent=ba;redraw(it);
+    }
+    msg.textContent='Rotation matched to the first image. Fine-tune with each card\'s sliders; different phases may need manual tweaks.';
+  },20);
+}
+
+function slider(label,min,max,val,step,cb){
+  const l=document.createElement('label');l.className='ctl';
+  const v=document.createElement('b');v.textContent=Math.round(val);
+  const s=document.createElement('input');s.type='range';s.min=min;s.max=max;s.step=step;s.value=val;
+  s.oninput=()=>{v.textContent=Math.round(+s.value);cb(+s.value)};
+  const t=document.createElement('span');t.append(label+' ',v);
+  l.append(t,s);
+  return{l,s,v};
+}
+
+function addItem(img,name){
+  const it={img,name,p:{...detect(img),rot:0,flip:false}};
+  const card=document.createElement('div');card.className='card';
+  const cv=document.createElement('canvas');it.cv=cv;
+  const nm=document.createElement('div');nm.className='name';nm.textContent=name;
+  const det=document.createElement('details');
+  det.innerHTML='<summary>Adjust</summary>';
+  const W=img.naturalWidth,H=img.naturalHeight;
+  const sx=slider('Centre X',0,W,it.p.cx,1,v=>{it.p.cx=v;redraw(it)});
+  const sy=slider('Centre Y',0,H,it.p.cy,1,v=>{it.p.cy=v;redraw(it)});
+  const sr=slider('Radius',5,Math.max(W,H),it.p.r,1,v=>{it.p.r=v;redraw(it)});
+  const sq=slider('Rotation°',-180,180,0,1,v=>{it.p.rot=v;redraw(it)});
+  const fl=document.createElement('label');fl.className='chk';
+  fl.innerHTML='<input type="checkbox"> Mirror';
+  fl.firstChild.onchange=e=>{it.p.flip=e.target.checked;redraw(it)};
+  det.append(sx.l,sy.l,sr.l,sq.l,fl);
+  it.ui={cx:sx.s,cxV:sx.v,cy:sy.s,cyV:sy.v,r:sr.s,rV:sr.v,rot:sq.s,rotV:sq.v};
+  const sb=document.createElement('button');sb.className='sec';sb.textContent='Save PNG';
+  sb.onclick=()=>save(it);
+  card.append(cv,nm,det,sb);grid.append(card);
+  items.push(it);redraw(it);
+}
+
+function syncUI(it){
+  const u=it.ui,p=it.p;
+  u.cx.value=p.cx;u.cxV.textContent=Math.round(p.cx);
+  u.cy.value=p.cy;u.cyV.textContent=Math.round(p.cy);
+  u.r.value=p.r;u.rV.textContent=Math.round(p.r);
+}
+
+$('files').onchange=e=>{
+  [...e.target.files].forEach(f=>{
+    const url=URL.createObjectURL(f),img=new Image();
+    img.onload=()=>{addItem(img,f.name);msg.textContent=items.length+' image(s) loaded.'};
+    img.onerror=()=>{msg.textContent='Could not read '+f.name};
+    img.src=url;
+  });
+  e.target.value='';
+};
+$('detect').onclick=()=>{items.forEach(it=>{Object.assign(it.p,detect(it.img));syncUI(it);redraw(it)})};
+$('align').onclick=alignAll;
+function save(it){
+  it.cv.toBlob(b=>{
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(b);
+    a.download=it.name.replace(/\.[^.]+$/,'')+'-moon.png';
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  },'image/png');
+}
+$('saveAll').onclick=()=>{
+  if(!items.length){msg.textContent='Nothing to save yet.';return}
+  items.forEach((it,i)=>setTimeout(()=>save(it),i*400));
+  msg.textContent='Saving '+items.length+' file(s). If only one downloads, allow multiple downloads for this site in your browser.';
+};
+$('size').oninput=e=>{$('vSize').textContent=e.target.value;redrawAll()};
+$('fill').oninput=e=>{$('vFill').textContent=e.target.value;redrawAll()};
+$('thr').oninput=e=>{$('vThr').textContent=e.target.value==0?'auto':e.target.value+'%'};
+$('thr').onchange=()=>$('detect').click();
+</script>
+</body>
+</html>
